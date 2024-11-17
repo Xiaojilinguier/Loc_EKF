@@ -1,5 +1,5 @@
-KF-GINS-main/bin/
-KF-GINS-main/lib/
-KF-GINS-main/build/
-KF-GINS-main/.idea/
-KF-GINS-main/dataset/
+bin/
+lib/
+build/
+.idea/
+dataset/
