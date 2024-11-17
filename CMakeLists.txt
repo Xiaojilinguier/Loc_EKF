@@ -19,10 +19,21 @@ file(GLOB_RECURSE SOURCE
         src/fileio/fileloader.cc
         src/fileio/filesaver.cc
         src/kf-gins/gi_engine.cpp
-        src/kf-gins/insmech.cpp)
+        src/kf-gins/insmech.cpp
+        src/kf-gins/drawError.cpp)
 
 include_directories(${PROJECT_SOURCE_DIR}/src)
 add_executable(${PROJECT_NAME} ${SOURCE})
+
+# python3
+set(Python3_INCLUDE_DIRS "/usr/include/python3.10")
+set(Python3_LIBRARIES "/usr/lib/x86_64-linux-gnu/libpython3.10.so")
+include_directories(${Python3_INCLUDE_DIRS})
+link_directories(${Python3_LIBRARIES})
+target_link_libraries(${PROJECT_NAME} ${Python3_LIBRARIES})
+
+# matplotlib-cpp
+include_directories("/home/sxh/matplotlib-cpp")
 
 # Eigen3
 include_directories(ThirdParty/eigen-3.3.9)
@@ -38,3 +49,5 @@ target_link_libraries(${PROJECT_NAME}
         absl::strings
         absl::str_format
         absl::time)
+
+

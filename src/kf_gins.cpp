@@ -20,16 +20,16 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include "common/angle.h"
+#include "fileio/filesaver.h"
+#include "fileio/gnssfileloader.h"
+#include "fileio/imufileloader.h"
+#include "kf-gins/drawError.h"
 #include <Eigen/Dense>
 #include <absl/time/clock.h>
 #include <iomanip>
 #include <iostream>
 #include <yaml-cpp/yaml.h>
-
-#include "common/angle.h"
-#include "fileio/filesaver.h"
-#include "fileio/gnssfileloader.h"
-#include "fileio/imufileloader.h"
 
 #include "kf-gins/gi_engine.h"
 
@@ -88,8 +88,9 @@ int main(int argc, char *argv[]) {
         starttime   = config["starttime"].as<double>();
         endtime     = config["endtime"].as<double>();
     } catch (YAML::Exception &exception) {
-        std::cout << "Failed when loading configuration. Please check the data length, data rate, and the process time!"
-                  << std::endl;
+        std::cout
+            << "Failed when loading configuration. Please check the data length, data rate, and the process time !"
+            << std::endl;
         return -1;
     }
 
@@ -221,6 +222,18 @@ int main(int argc, char *argv[]) {
     std::cout << "From " << starttime << " s to " << endtime << " s, total " << interval << " s!" << std::endl;
     std::cout << "Cost " << absl::ToDoubleSeconds(te - ts) << " s in total" << std::endl;
 
+    // 绘制误差图
+    DrawError drawError("/home/sxh/KF-GINS-main/dataset/KF_GINS_Navresult.nav",
+                        "/home/sxh/KF-GINS-main/dataset/truth.nav");
+
+    if (!drawError.loadData()) {
+        std::cerr << "Error loading data files." << std::endl;
+        return -1;
+    }
+    // 计算误差并绘制误差曲线
+    drawError.computeErrors();
+    drawError.plotErrors();
+    std::cout << "draw complete" << std::endl;
     return 0;
 }
 

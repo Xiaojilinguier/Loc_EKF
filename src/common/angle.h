@@ -22,7 +22,8 @@
 
 #ifndef ANGLE_H
 #define ANGLE_H
-
+#include <Eigen/Dense>
+#include <math.h>
 const double D2R = (M_PI / 180.0);
 const double R2D = (180.0 / M_PI);
 
