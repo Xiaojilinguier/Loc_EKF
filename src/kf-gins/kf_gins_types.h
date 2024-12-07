@@ -37,8 +37,8 @@ typedef struct Attitude {
 
 // 位置速度姿态
 typedef struct PVA {
-    Eigen::Vector3d pos; // 地球坐标系下的大地位置 经纬高
-    Eigen::Vector3d vel; // IMU相对于地球的速度投影在导航参考坐标系下 (北向速度-东向速度-垂向速度)
+    Eigen::Vector3d pos; // 地球坐标系下的大地位置 纬经高(单位：rad rad m)
+    Eigen::Vector3d vel; // IMU相对于地球的速度投影在导航参考坐标系下 (北向速度-东向速度-垂向速度 m/s)
     Attitude att; // IMU相对于导航参考坐标系的姿态角
                   // (四元数、方向余弦矩阵或欧拉角，其中欧拉角定义为航向角-俯仰角-横滚角，ZYX旋转顺序)
 } PVA;
@@ -52,7 +52,7 @@ typedef struct ImuError {
 
 // 导航状态 位置速度姿态
 typedef struct NavState {
-    Eigen::Vector3d pos; // 经纬高(弧度制)
+    Eigen::Vector3d pos; // 纬经高(弧度制)
     Eigen::Vector3d vel;
     Eigen::Vector3d euler;
 
@@ -80,9 +80,9 @@ typedef struct GINSOptions {
     // imu noise parameters
     ImuNoise imunoise;
 
-    // 安装参数
-    // install parameters
-    Eigen::Vector3d antlever = {0, 0, 0};
+    // // 安装参数
+    // // install parameters
+    // Eigen::Vector3d antlever = {0, 0, 0};
 
     void print_options() {
         std::cout << "---------------KF-GINS Options:---------------" << std::endl;
@@ -133,9 +133,9 @@ typedef struct GINSOptions {
         std::cout << '\t' << "- accscale std: " << imunoise.accscale_std.transpose() * 1e6 << " [ppm] " << std::endl;
         std::cout << '\t' << "- correlation time: " << imunoise.corr_time / 3600.0 << " [h] " << std::endl;
 
-        // 打印GNSS天线杆臂
-        // print GNSS antenna leverarm
-        std::cout << " - Antenna leverarm: " << antlever.transpose() << " [m] " << std::endl << std::endl;
+        // // 打印GNSS天线杆臂
+        // // print GNSS antenna leverarm
+        // std::cout << " - Antenna leverarm: " << antlever.transpose() << " [m] " << std::endl << std::endl;
     }
 
 } GINSOptions;

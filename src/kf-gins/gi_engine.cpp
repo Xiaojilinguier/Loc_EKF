@@ -1,37 +1,75 @@
-/*
- * KF-GINS: An EKF-Based GNSS/INS Integrated Navigation System
- *
- * Copyright (C) 2022 i2Nav Group, Wuhan University
- *
- *     Author : Liqiang Wang
- *    Contact : wlq@whu.edu.cn
- *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <https://www.gnu.org/licenses/>.
- */
-
+#include "gi_engine.h"
 #include "common/earth.h"
 #include "common/rotation.h"
-
-#include "gi_engine.h"
 #include "insmech.h"
+#include "satellite.h"
+#include <random>
 
-GIEngine::GIEngine(GINSOptions &options) {
+// 计算飞行器与卫星之间的测距
+double GIEngine::computeLaserRange(const Eigen::Vector3d &aircraft_pos, const Eigen::Vector3d &satellite_pos) {
+    return (aircraft_pos - satellite_pos).norm(); // 返回飞行器与卫星之间的欧几里得距离
+}
 
-    this->options_ = options;
+// 计算并绘制误差图
+void GIEngine::compute_and_print_error(int timeIndex) {
+    std::vector<double> real_pos = getRealPos(timeIndex); // 纬经高(deg) 形式
+    double x, y, z;
+    LLA_to_ecef(real_pos[0], real_pos[1], real_pos[2], x, y, z);
+    std::vector<double> real_vel = getRealVel(timeIndex);
+    std::vector<double> est_pos  = getEstimatePos();
+    std::vector<double> est_vel  = getEstimateVel();
+    double error_x               = x - est_pos[0];
+    double error_y               = y - est_pos[1];
+    double error_z               = z - est_pos[2];
+    double error_vx              = real_vel[0] - est_vel[0];
+    double error_vy              = real_vel[1] - est_vel[1];
+    double error_vz              = real_vel[2] - est_vel[2];
+    std::cout << "pos_error(ECEF, m): " << error_x << ", " << error_y << ", " << error_z << std::endl;
+    std::cout << "vel_error(NED, m/s): " << error_vx << ", " << error_vy << ", " << error_vz << std::endl;
+}
+
+// BLH to ECEF 的Jacobian矩阵
+Matrix3d GIEngine::computeBLHtoECEFJacobian(const Vector3d &blh) {
+    double phi    = blh[0]; // Latitude
+    double lambda = blh[1]; // Longitude
+    double h      = blh[2]; // Height
+
+    Eigen::Vector2d rmn = Earth::meridianPrimeVerticalRadius(phi);
+    double N            = rmn[1];
+    double e2           = 0.00669437999014; // WGS84 eccentricity squared
+
+    Matrix3d jacobian = Matrix3d::Zero();
+    // Partial derivatives w.r.t. latitude (phi)
+    jacobian(0, 0) = -(N + h) * sin(phi) * cos(lambda);
+    jacobian(1, 0) = -(N + h) * sin(phi) * sin(lambda);
+    jacobian(2, 0) = (N * (1 - e2) + h) * cos(phi);
+
+    // Partial derivatives w.r.t. longitude (lambda)
+    jacobian(0, 1) = -(N + h) * cos(phi) * sin(lambda);
+    jacobian(1, 1) = (N + h) * cos(phi) * cos(lambda);
+    jacobian(2, 1) = 0;
+
+    // Partial derivatives w.r.t. height (h)
+    jacobian(0, 2) = cos(phi) * cos(lambda);
+    jacobian(1, 2) = cos(phi) * sin(lambda);
+    jacobian(2, 2) = sin(phi);
+
+    return jacobian;
+}
+
+GIEngine::GIEngine(GINSOptions &options, std::string tlepath, std::string coverpath, std::string truthpath,
+                   double starttime, double endtime) {
+    this->starttime_     = starttime;
+    this->tlepath_       = tlepath;
+    this->coverpath_     = coverpath;
+    this->truthpath_     = truthpath;
+    this->options_       = options;
+    this->dataProcesser_ = new DataProcessing(truthpath, coverpath);
+    dataProcesser_->load_position_velocity(starttime, endtime, realPositions_, realVelocities_, truthpath);
+    // dataProcesser
     options_.print_options();
-    timestamp_ = 0;
-
+    timestamp_        = 0;
+    choose_sat_index_ = 0;
     // 设置协方差矩阵，系统噪声阵和系统误差状态矩阵大小
     // resize covariance matrix, system noise matrix, and system error state matrix
     Cov_.resize(RANK, RANK);          // 协方差阵
@@ -60,6 +98,14 @@ GIEngine::GIEngine(GINSOptions &options) {
     // 设置系统状态(位置、速度、姿态和IMU误差)初值和初始协方差
     // set initial state (position, velocity, attitude and IMU error) and covariance
     initialize(options_.initstate, options_.initstate_std);
+}
+
+// 获取卫星ECEF位置
+bool GIEngine::getSatellitePosition(satellite *sat, const std::string &now_time, Eigen::Vector3d &satellite_pos) {
+    if (!sat->get_position(now_time, satellite_pos)) {
+        return false; // 如果获取卫星位置失败，返回 false
+    }
+    return true;
 }
 
 void GIEngine::initialize(const NavState &initstate, const NavState &initstate_std) {
@@ -91,59 +137,102 @@ void GIEngine::initialize(const NavState &initstate, const NavState &initstate_s
     Cov_.block(SA_ID, SA_ID, 3, 3)   = imuerror_std.accscale.cwiseProduct(imuerror_std.accscale).asDiagonal();
 }
 
-void GIEngine::newImuProcess() {
+void GIEngine::newImuProcess(int truthdatarate) {
 
     // 当前IMU时间作为系统当前状态时间,
     // set current IMU time as the current state time
     timestamp_ = imucur_.time;
 
-    // 如果GNSS有效，则将更新时间设置为GNSS时间
-    // set update time as the gnss time if gnssdata is valid
-    double updatetime = gnssdata_.isvalid ? gnssdata_.time : -1;
+    double miu   = 0;   // 测距误差平均值
+    double sigma = 0.1; // 测距误差标准差
+    // 随机数生成器
+    std::default_random_engine generator;
+    std::normal_distribution<double> distribution(miu, sigma);
 
-    // 判断是否需要进行GNSS更新
-    // determine if we should do GNSS update
-    int res = isToUpdate(imupre_.time, imucur_.time, updatetime);
+    // 如果距离上次激光测距的时间超过2秒，则更新卫星位置和激光测距信息
+    if (timestamp_ - last_laser_time_ >= 2.0) {
+        std::string now_time = dataProcesser_->time_to_mmss(std::to_string(timestamp_));
+        std::cout << "now_time: " << now_time << std::endl;
 
-    if (res == 0) {
-        // 只传播导航状态
-        // only propagate navigation state
-        insPropagation(imupre_, imucur_);
-    } else if (res == 1) {
-        // GNSS数据靠近上一历元，先对上一历元进行GNSS更新
-        // gnssdata is near to the previous imudata, we should firstly do gnss update
-        gnssUpdate(gnssdata_);
-        stateFeedback();
+        // 计算并输出定位误差
+        int timeindex = (timestamp_ - starttime_) * truthdatarate;
+        std::cout << "滤波前误差：" << std::endl;
+        compute_and_print_error(timeindex);
 
-        pvapre_ = pvacur_;
-        insPropagation(imupre_, imucur_);
-    } else if (res == 2) {
-        // GNSS数据靠近当前历元，先对当前IMU进行状态传播
-        // gnssdata is near current imudata, we should firstly propagate navigation state
-        insPropagation(imupre_, imucur_);
-        gnssUpdate(gnssdata_);
-        stateFeedback();
-    } else {
-        // GNSS数据在两个IMU数据之间(不靠近任何一个), 将当前IMU内插到整秒时刻
-        // gnssdata is between the two imudata, we interpolate current imudata to gnss time
-        IMU midimu;
-        imuInterpolate(imupre_, imucur_, updatetime, midimu);
+        // 获取卫星信息
+        std::vector<std::string> satellite_id_list;
+        if (!dataProcesser_->find_satellites_by_time(now_time, satellite_id_list)) {
+            std::cerr << "No satellites found at time " << timestamp_ << std::endl;
+        }
 
-        // 对前一半IMU进行状态传播
-        // propagate navigation state for the first half imudata
-        insPropagation(imupre_, midimu);
+        std::cout << "卫星可覆盖列表：[ ";
+        for (int i = 0; i < satellite_id_list.size(); i++) {
+            std::cout << satellite_id_list[i];
+            if (i != satellite_id_list.size() - 1) {
+                std::cout << ", ";
+            }
+        }
+        std::cout << "]" << std::endl;
 
-        // 整秒时刻进行GNSS更新，并反馈系统状态
-        // do GNSS position update at the whole second and feedback system states
-        gnssUpdate(gnssdata_);
-        stateFeedback();
+        if (satellite_id_list.empty()) {
+            std::cout << "No satellite coverage at time " << now_time << std::endl;
+            // 只传播导航状态
+            // only propagate navigation state
+            insPropagation(imupre_, imucur_);
+        } else {
+            insPropagation(imupre_, imucur_);
+            // 随机误差
+            double random_error = distribution(generator);
 
-        // 对后一半IMU进行状态传播
-        // propagate navigation state for the second half imudata
-        pvapre_ = pvacur_;
-        insPropagation(midimu, imucur_);
+            // 选择卫星并计算激光测距
+            std::size_t satellite_index = (choose_sat_index_++) % satellite_id_list.size();
+            std::string satellite_id    = satellite_id_list[satellite_index];
+
+            std::cout << "选择卫星：" << satellite_id << std::endl;
+            Eigen::Vector3d satellite_pos_ecef;
+
+            // 计算真实卫星位置
+            satellite *sat = new satellite(satellite_id, tlepath_);
+            if (!getSatellitePosition(sat, now_time, satellite_pos_ecef)) {
+                std::cerr << "Failed to get satellite position for " << satellite_id << std::endl;
+                return;
+            }
+
+            // 计算飞行器与卫星之间的真实测距
+            int pos_index = (timestamp_ - starttime_) * truthdatarate;
+
+            Eigen::Vector3d aircraft_real_pos_now_blh = Eigen::Vector3d(
+                realPositions_[pos_index][0] * D2R, realPositions_[pos_index][1] * D2R, realPositions_[pos_index][2]);
+            Eigen::Vector3d aircraft_real_pos_now_ecef = Earth::blh2ecef(aircraft_real_pos_now_blh);
+
+            double rangeMeasurement = computeLaserRange(aircraft_real_pos_now_ecef, satellite_pos_ecef);
+
+            // 添加高斯误差
+            rangeMeasurement += random_error;
+
+            // 添加激光测距数据到 GIEngine 并进行状态更新
+            LaserUpdate(rangeMeasurement, satellite_pos_ecef);
+            stateFeedback();
+            // 计算并输出定位误差
+            int timeindex = (timestamp_ - starttime_) * truthdatarate;
+            std::cout << "滤波后误差：" << std::endl;
+            compute_and_print_error(timeindex);
+        }
+
+        // 更新上次激光测距的时间
+        last_laser_time_ = timestamp_;
+        std::cout << "----------------------------" << std::endl;
     }
 
+    else {
+        // 还未开始激光测距，只用IMU传播导航状态
+        // only propagate navigation state
+        insPropagation(imupre_, imucur_);
+    }
+    // // 计算并输出定位误差
+    // int timeindex = (timestamp_ - starttime_) * truthdatarate;
+    // std::cout << "滤波后误差：" << std::endl;
+    // compute_and_print_error(timeindex);
     // 检查协方差矩阵对角线元素
     // check diagonal elements of current covariance matrix
     checkCov();
@@ -301,43 +390,6 @@ void GIEngine::insPropagation(IMU &imupre, IMU &imucur) {
     EKFPredict(Phi, Qd);
 }
 
-void GIEngine::gnssUpdate(GNSS &gnssdata) {
-
-    // IMU位置转到GNSS天线相位中心位置
-    // convert IMU position to GNSS antenna phase center position
-    Eigen::Vector3d antenna_pos;
-    Eigen::Matrix3d Dr, Dr_inv;
-    Dr_inv      = Earth::DRi(pvacur_.pos);
-    Dr          = Earth::DR(pvacur_.pos);
-    antenna_pos = pvacur_.pos + Dr_inv * pvacur_.att.cbn * options_.antlever;
-
-    // GNSS位置测量新息
-    // compute GNSS position innovation
-    Eigen::MatrixXd dz;
-    dz = Dr * (antenna_pos - gnssdata.blh);
-
-    // 构造GNSS位置观测矩阵
-    // construct GNSS position measurement matrix
-    Eigen::MatrixXd H_gnsspos;
-    H_gnsspos.resize(3, Cov_.rows());
-    H_gnsspos.setZero();
-    H_gnsspos.block(0, P_ID, 3, 3)   = Eigen::Matrix3d::Identity();
-    H_gnsspos.block(0, PHI_ID, 3, 3) = Rotation::skewSymmetric(pvacur_.att.cbn * options_.antlever);
-
-    // 位置观测噪声阵
-    // construct measurement noise matrix
-    Eigen::MatrixXd R_gnsspos;
-    R_gnsspos = gnssdata.std.cwiseProduct(gnssdata.std).asDiagonal();
-
-    // EKF更新协方差和误差状态
-    // do EKF update to update covariance and error state
-    EKFUpdate(dz, H_gnsspos, R_gnsspos);
-
-    // GNSS更新之后设置为不可用
-    // Set GNSS invalid after update
-    gnssdata.isvalid = false;
-}
-
 int GIEngine::isToUpdate(double imutime1, double imutime2, double updatetime) const {
 
     if (abs(imutime1 - updatetime) < TIME_ALIGN_ERR) {
@@ -370,7 +422,46 @@ void GIEngine::EKFPredict(Eigen::MatrixXd &Phi, Eigen::MatrixXd &Qd) {
     dx_  = Phi * dx_;
 }
 
-void GIEngine::EKFUpdate(Eigen::MatrixXd &dz, Eigen::MatrixXd &H, Eigen::MatrixXd &R) {
+// 新增的添加激光测距数据到系统并进行更新的函数
+void GIEngine::LaserUpdate(const double &z, const Eigen::Vector3d &satellite_pos_ecef) {
+    // 激光测距数据的测量矩阵 H
+    Eigen::MatrixXd H;
+    H.resize(1, Cov_.rows());
+    H.setZero();
+
+    Eigen::Matrix3d Dr_inv;
+    Dr_inv = Earth::DRi(pvacur_.pos);
+
+    Eigen::Vector3d delta_r              = dx_.block(P_ID, 0, 3, 1);
+    Eigen::Vector3d ins_pos_feedback_blh = pvacur_.pos - Dr_inv * delta_r; // 单位：rad rad m
+
+    Eigen::Vector3d ins_pos_feedback_ecef = Earth::blh2ecef(ins_pos_feedback_blh);
+
+    //  计算飞行器与卫星之间的测距
+    double range_measured  = z;                                                            // 观测值
+    double range_predicted = computeLaserRange(ins_pos_feedback_ecef, satellite_pos_ecef); // 计算预测的测距
+
+    // 计算测量残差 dz
+    Eigen::VectorXd dz(1);
+    dz(0) = range_measured - range_predicted; // 观测值减去预测值
+
+    // 观测矩阵 H 计算（通过位置对测距的影响）
+    Eigen::Vector3d diff = ins_pos_feedback_ecef - satellite_pos_ecef;
+    double range         = diff.norm();
+    Matrix3d J           = computeBLHtoECEFJacobian(ins_pos_feedback_blh); // 计算雅可比矩阵J
+    // if (range > 1e-6) {
+    //     // 计算H矩阵，反映位置误差对测距的影响,
+    //     H.block(0, P_ID, 1, 3) = diff.transpose() / range * J * Dr_inv * (-1);
+    // }
+    H.block(0, P_ID, 1, 3) = diff.transpose() / range * J * Dr_inv * (-1);
+    // 激光测距的测量噪声矩阵 R（假设为常数噪声，具体根据实际情况调整）
+    Eigen::MatrixXd R = Eigen::MatrixXd::Identity(1, 1) * 0.1; // 假设测量噪声为0.1米
+
+    // 执行EKF更新
+    EKFUpdate(dz, H, R);
+}
+
+void GIEngine::EKFUpdate(Eigen::VectorXd &dz, Eigen::MatrixXd &H, Eigen::MatrixXd &R) {
 
     assert(H.cols() == Cov_.rows());
     assert(dz.rows() == H.rows());
@@ -391,8 +482,9 @@ void GIEngine::EKFUpdate(Eigen::MatrixXd &dz, Eigen::MatrixXd &H, Eigen::MatrixX
     // 如果每次更新后都进行状态反馈，则更新前dx_一直为0，下式可以简化为：dx_ = K * dz;
     // if state feedback is performed after every update, dx_ is always zero before the update
     // the following formula can be simplified as : dx_ = K * dz;
-    dx_  = dx_ + K * (dz - H * dx_);
+    dx_  = dx_ + K * dz;
     Cov_ = I * Cov_ * I.transpose() + K * R * K.transpose();
+    // Cov_ = (Eigen::MatrixXd::Identity(Cov_.rows(), Cov_.rows()) - K * H) * Cov_; // 更新协方差矩阵 (GPT写的)
 }
 
 void GIEngine::stateFeedback() { // 误差反馈
@@ -403,8 +495,8 @@ void GIEngine::stateFeedback() { // 误差反馈
     // 位置误差反馈
     // posisiton error feedback
     Eigen::Vector3d delta_r = dx_.block(P_ID, 0, 3, 1);
-    Eigen::Matrix3d Dr_inv = Earth::DRi(pvacur_.pos); // 计算从当前 地理坐标系 到 n系 的变换矩阵的 逆矩阵。
-    pvacur_.pos -= Dr_inv * delta_r;                  // 把误差转换到地理系 然后再减
+    Eigen::Matrix3d Dr_inv  = Earth::DRi(pvacur_.pos); // 计算从当前 n系 到 地理坐标系 的变换矩阵
+    pvacur_.pos -= Dr_inv * delta_r;                   // 把误差转换到地理系 然后再减
 
     // 速度误差反馈
     // velocity error feedback

@@ -1,18 +1,26 @@
 #include "drawError.h"
 
 bool DrawError::loadData() {
-    est_data   = loadNavData(est_file);
-    truth_data = loadNavData(truth_file);
-    return !est_data.empty() && !truth_data.empty();
+    this->est_data_   = loadNavData(est_file);
+    this->truth_data_ = loadNavData(truth_file);
+    if (this->est_data_.empty()) {
+        std::cout << "导航结果文件读取失败" << std::endl;
+        return 0;
+    }
+    if (this->truth_data_.empty()) {
+        std::cout << "真实航迹文件读取失败" << std::endl;
+        return 0;
+    }
+    return !this->est_data_.empty() && !this->truth_data_.empty();
 }
 
 void DrawError::computeErrors() {
-    for (auto &pair : est_data) {
+    for (auto &pair : this->est_data_) {
         const auto &key    = pair.first;
         const NavData &est = pair.second;
 
-        if (truth_data.find(key) != truth_data.end()) {
-            const NavData &truth = truth_data.at(key);
+        if (this->truth_data_.find(key) != this->truth_data_.end()) {
+            const NavData &truth = truth_data_.at(key);
 
             double est_x, est_y, est_z, truth_x, truth_y, truth_z;
             convertToCartesian(est, est_x, est_y, est_z);
@@ -36,9 +44,8 @@ void DrawError::computeErrors() {
 }
 
 // 绘制误差曲线
-void DrawError::plotErrors() {
-    // 采样间隔为2秒
-    double time_step = 50.0;
+void DrawError::plotErrors(int time_step) {
+    // 采样间隔为time_step
 
     // 创建新容器存储采样后的数据
     std::vector<double> sampled_time;

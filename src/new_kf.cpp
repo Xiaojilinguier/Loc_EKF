@@ -1,8 +1,8 @@
 #include "common/angle.h"
 #include "fileio/filesaver.h"
-#include "fileio/gnssfileloader.h"
 #include "fileio/imufileloader.h"
 #include "kf-gins/drawError.h"
+#include "kf-gins/satellite.h"
 #include <Eigen/Dense>
 #include <absl/time/clock.h>
 #include <iomanip>
@@ -14,7 +14,6 @@
 bool loadConfig(YAML::Node &config, GINSOptions &options);
 void writeNavResult(double time, NavState &navstate, FileSaver &navfile, FileSaver &imuerrfile);
 void writeSTD(double time, Eigen::MatrixXd &cov, FileSaver &stdfile);
-
 int main(int argc, char *argv[]) {
 
     if (argc != 2) {
@@ -26,7 +25,6 @@ int main(int argc, char *argv[]) {
     auto ts = absl::Now();
 
     // 加载配置文件
-    // load configuration file
     YAML::Node config;
     try {
         config = YAML::LoadFile(argv[1]);
@@ -36,8 +34,7 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    // 读取配置参数到GINSOptioins中，并构造GIEngine
-    // load configuration parameters to GINSOptioins
+    // 读取配置参数到 GINSOptions 中，并构造 GIEngine
     GINSOptions options;
     if (!loadConfig(config, options)) {
         std::cout << "Error occurs in the configuration file!" << std::endl;
@@ -45,26 +42,28 @@ int main(int argc, char *argv[]) {
     }
 
     // 读取文件路径配置
-    // load filepath configuration
-    std::string imupath, gnsspath, outputpath;
+    std::string imupath, tlepath, outputpath, truthpath, coverpath;
     try {
         imupath    = config["imupath"].as<std::string>();
-        gnsspath   = config["gnsspath"].as<std::string>();
+        tlepath    = config["tlepath"].as<std::string>();   // TLE 文件路径
+        coverpath  = config["coverpath"].as<std::string>(); // 卫星覆盖分析文件路径
+        truthpath  = config["truthpath"].as<std::string>(); // 真实航迹文件路径
         outputpath = config["outputpath"].as<std::string>();
     } catch (YAML::Exception &exception) {
         std::cout << "Failed when loading configuration. Please check the file path and output path!" << std::endl;
         return -1;
     }
 
-    // imu数据配置，数据处理区间
-    // imudata configuration， data processing interval
-    int imudatalen, imudatarate;
-    double starttime, endtime;
+    // IMU 数据配置，数据处理区间
+    int imudatalen, imudatarate, truthdatarate;
+    double starttime, endtime, laserstarttime;
     try {
-        imudatalen  = config["imudatalen"].as<int>();
-        imudatarate = config["imudatarate"].as<int>();
-        starttime   = config["starttime"].as<double>();
-        endtime     = config["endtime"].as<double>();
+        imudatalen     = config["imudatalen"].as<int>();
+        imudatarate    = config["imudatarate"].as<int>();
+        truthdatarate  = config["truthdatarate"].as<int>();
+        starttime      = config["starttime"].as<double>();
+        endtime        = config["endtime"].as<double>();
+        laserstarttime = config["laserstarttime"].as<double>();
     } catch (YAML::Exception &exception) {
         std::cout
             << "Failed when loading configuration. Please check the data length, data rate, and the process time !"
@@ -72,86 +71,43 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    // 加载GNSS文件和IMU文件
-    // load GNSS file and IMU file
-    GnssFileLoader gnssfile(gnsspath);
+    // 加载IMU文件和TLE文件
     ImuFileLoader imufile(imupath, imudatalen, imudatarate);
 
     // 构造GIEngine
-    // Construct GIEngine
     GIEngine giengine(options, tlepath, coverpath, truthpath, starttime, endtime);
 
     // 构造输出文件
-    // construct output file
-    // navfile: gnssweek(1) + time(1) + pos(3) + vel(3) + euler angle(3) = 11
-    // imuerrfile: time(1) + gyrbias(3) + accbias(3) + gyrscale(3) + accscale(3) = 13
-    // stdfile: time(1) + pva_std(9) + imubias_std(6) + imuscale_std(6) = 22
     int nav_columns = 11, imuerr_columns = 13, std_columns = 22;
     FileSaver navfile(outputpath + "/KF_GINS_Navresult.nav", nav_columns, FileSaver::TEXT);
     FileSaver imuerrfile(outputpath + "/KF_GINS_IMU_ERR.txt", imuerr_columns, FileSaver::TEXT);
     FileSaver stdfile(outputpath + "/KF_GINS_STD.txt", std_columns, FileSaver::TEXT);
 
-    // 检查文件是否正确打开
-    // check if these files are all opened
-    if (!gnssfile.isOpen() || !imufile.isOpen() || !navfile.isOpen() || !imuerrfile.isOpen() || !stdfile.isOpen()) {
-        std::cout << "gnssfile:" << gnssfile.isOpen() << std::endl;
-        std::cout << "imufile:" << imufile.isOpen() << std::endl;
-        std::cout << "navfile:" << navfile.isOpen() << std::endl;
-        std::cout << "imuerrfile:" << imuerrfile.isOpen() << std::endl;
-        std::cout << "stdfile:" << stdfile.isOpen() << std::endl;
-        return -1;
-    }
-
-    // 检查处理时间
-    // check process time
-    if (endtime < 0) {
-
-        endtime = imufile.endtime();
-        std::cout << "endtime:" << endtime << std::endl;
-    }
-    if (endtime > 604800 || starttime < imufile.starttime() || starttime > endtime) {
-        std::cout << "Process time ERROR!" << std::endl;
+    if (!imufile.isOpen() || !navfile.isOpen() || !imuerrfile.isOpen() || !stdfile.isOpen()) {
+        std::cout << "File open error!" << std::endl;
         return -1;
     }
 
     // 数据对齐
-    // data alignment
     IMU imu_cur;
     do {
         imu_cur = imufile.next();
     } while (imu_cur.time < starttime);
 
-    GNSS gnss;
-    do {
-        gnss = gnssfile.next();
-    } while (gnss.time <= starttime);
-
     // 添加IMU数据到GIEngine中，补偿IMU误差
     // add imudata to GIEngine and compensate IMU error
     giengine.addImuData(imu_cur, true);
 
-    // 添加GNSS数据到GIEngine
-    // add gnssdata to GIEngine
-    giengine.addGnssData(gnss);
-
     // 用于保存处理结果
-    // used to save processing results
     double timestamp;
     NavState navstate;
     Eigen::MatrixXd cov;
 
-    // 用于显示处理进程
-    // used to display processing progress
+    // 显示进度
     int percent = 0, lastpercent = 0;
-    double interval = endtime - starttime;
-
+    double interval           = endtime - starttime;
+    giengine.last_laser_time_ = laserstarttime - 2.0;
     while (true) {
-        // 当前IMU状态时间新于GNSS时间时，读取并添加新的GNSS数据到GIEngine
-        // load new gnssdata when current state time is newer than GNSS time and add it to GIEngine
-        if (gnss.time < imu_cur.time && !gnssfile.isEof()) {
-            gnss = gnssfile.next();
-            giengine.addGnssData(gnss);
-        }
 
         // 读取并添加新的IMU数据到GIEngine
         // load new imudata and add it to GIEngine
@@ -161,23 +117,19 @@ int main(int argc, char *argv[]) {
         }
         giengine.addImuData(imu_cur);
 
-        // 处理新的IMU数据
-        // process new imudata
-        giengine.newImuProcess();
+        // 处理IMU数据
+        giengine.newImuProcess(truthdatarate);
 
-        // 获取当前时间，IMU状态和协方差
-        // get current timestamp, navigation state and covariance
+        // 获取当前时间、导航状态和协方差
         timestamp = giengine.timestamp();
         navstate  = giengine.getNavState();
         cov       = giengine.getCovariance();
 
         // 保存处理结果
-        // save processing results
         writeNavResult(timestamp, navstate, navfile, imuerrfile);
         writeSTD(timestamp, cov, stdfile);
 
-        // 显示处理进展
-        // display processing progress
+        // 显示进度
         percent = int((imu_cur.time - starttime) / interval * 100);
         if (percent - lastpercent >= 1) {
             std::cout << " - Processing: " << std::setw(3) << percent << "%\r" << std::flush;
@@ -185,34 +137,31 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // 关闭打开的文件
-    // close opened file
+    // 关闭文件
     imufile.close();
-    gnssfile.close();
     navfile.close();
     imuerrfile.close();
     stdfile.close();
 
-    // 处理完毕0
-    // process finish
+    // 处理完毕
     auto te = absl::Now();
-    std::cout << std::endl << std::endl << "KF-GINS Process Finish! ";
+    std::cout << std::endl << "KF-GINS Process Finish!" << std::endl;
     std::cout << "From " << starttime << " s to " << endtime << " s, total " << interval << " s!" << std::endl;
     std::cout << "Cost " << absl::ToDoubleSeconds(te - ts) << " s in total" << std::endl;
+    // 绘制误差图
+    DrawError drawError("/home/sxh/Loc_EKF/dataset/KF_GINS_Navresult.nav",
+                        "/home/sxh/Loc_EKF/dataset/truth_modified.txt");
 
-    // // 绘制误差图
-    // DrawError drawError("/home/sxh/KF-GINS-main/dataset/KF_GINS_Navresult.nav",
-    //                     "/home/sxh/KF-GINS-main/dataset/truth.nav");
-
-    // if (!drawError.loadData()) {
-    //     std::cerr << "Error loading data files." << std::endl;
-    //     return -1;
-    // }
-    // // 计算误差并绘制误差曲线
-    // drawError.computeErrors();
-    // drawError.plotErrors();
-    // std::cout << "draw complete" << std::endl;
-    // return 0;
+    if (!drawError.loadData()) {
+        std::cerr << "Error loading data files." << std::endl;
+        return -1;
+    }
+    // 计算误差并绘制误差曲线
+    drawError.computeErrors();
+    int plot_time_step = 2;
+    drawError.plotErrors(plot_time_step);
+    std::cout << "draw complete!" << std::endl;
+    return 0;
 }
 
 /**
@@ -267,8 +216,7 @@ bool loadConfig(YAML::Node &config, GINSOptions &options) {
         vec2 = config["initvelstd"].as<std::vector<double>>();
         vec3 = config["initattstd"].as<std::vector<double>>();
     } catch (YAML::Exception &exception) {
-        std::cout << "Failed when loading configuration. Please check initial std of position, velocity, and
-            attitude !"
+        std::cout << "Failed when loading configuration. Please check initial std of position, velocity, and attitude !"
                   << std::endl;
         return false;
     }
@@ -345,15 +293,15 @@ bool loadConfig(YAML::Node &config, GINSOptions &options) {
     options.imunoise.accscale_std *= 1e-6;
     options.imunoise.corr_time *= 3600;
 
-    // GNSS天线杆臂, GNSS天线相位中心在IMU坐标系下位置
-    // gnss antenna leverarm, position of GNSS antenna phase center in IMU frame
-    try {
-        vec1 = config["antlever"].as<std::vector<double>>();
-    } catch (YAML::Exception &exception) {
-        std::cout << "Failed when loading configuration. Please check antenna leverarm!" << std::endl;
-        return false;
-    }
-    options.antlever = Eigen::Vector3d(vec1.data());
+    // // GNSS天线杆臂, GNSS天线相位中心在IMU坐标系下位置
+    // // gnss antenna leverarm, position of GNSS antenna phase center in IMU frame
+    // try {
+    //     vec1 = config["antlever"].as<std::vector<double>>();
+    // } catch (YAML::Exception &exception) {
+    //     std::cout << "Failed when loading configuration. Please check antenna leverarm!" << std::endl;
+    //     return false;
+    // }
+    // options.antlever = Eigen::Vector3d(vec1.data());
 
     return true;
 }

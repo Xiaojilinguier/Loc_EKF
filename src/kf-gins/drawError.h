@@ -35,13 +35,13 @@ public:
     void computeErrors();
 
     // 绘制误差曲线
-    void plotErrors();
+    void plotErrors(int time_step);
 
 private:
     std::string est_file;
     std::string truth_file;
-    std::map<double, NavData> est_data;
-    std::map<double, NavData> truth_data;
+    std::map<double, NavData> est_data_;
+    std::map<double, NavData> truth_data_;
     std::vector<double> time;
     std::vector<double> pos_errors_x; // Position error vector
     std::vector<double> pos_errors_y;

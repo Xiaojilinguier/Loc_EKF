@@ -22,20 +22,25 @@
 
 #ifndef GI_ENGINE_H
 #define GI_ENGINE_H
-
-#include <Eigen/Dense>
-#include <vector>
-
+#include "DataProcessing.h"
 #include "common/types.h"
+#include "satellite.h"
+#include <Eigen/Dense>
+#include <string>
+#include <vector>
 
 #include "kf_gins_types.h"
 
 class GIEngine {
 
 public:
-    explicit GIEngine(GINSOptions &options);
+    explicit GIEngine(GINSOptions &options, std::string tlepath, std::string coverpath, std::string truthpath,
+                      double starttime, double endtime);
 
     ~GIEngine() = default;
+
+    // 获取卫星位置
+    bool getSatellitePosition(satellite *sat, const std::string &now_time, Eigen::Vector3d &satellite_pos);
 
     /**
      * @brief 添加新的IMU数据，(不)补偿IMU误差
@@ -73,7 +78,7 @@ public:
      * @brief 处理新的IMU数据
      *        process new imudata
      * */
-    void newImuProcess();
+    void newImuProcess(int imudatarate);
 
     /**
      * @brief 内插增量形式的IMU数据到指定时刻
@@ -126,6 +131,59 @@ public:
     Eigen::MatrixXd getCovariance() {
         return Cov_;
     }
+
+    // 由于加载进内存的真实航迹数据从starttime到endtime 所以需要用index来索引时间对应的下标
+    std::vector<double> getRealPos(int index) {
+        return realPositions_[index]; // 纬经高(deg)
+    }
+
+    std::vector<double> getRealVel(int index) {
+        return realVelocities_[index];
+    }
+
+    // 获取估计的位置
+    std::vector<double> getEstimatePos() {
+        double lat = pvacur_.pos[0] * R2D;
+        double lon = pvacur_.pos[1] * R2D;
+        double alt = pvacur_.pos[2];
+        std::vector<double> res;
+        double x, y, z;
+        LLA_to_ecef(lat, lon, alt, x, y, z);
+        res.push_back(x);
+        res.push_back(y);
+        res.push_back(z);
+        return res;
+    }
+
+    // 获取估计的北东地速度
+    std::vector<double> getEstimateVel() {
+        std::vector<double> res;
+        res.push_back(pvacur_.vel[0]);
+        res.push_back(pvacur_.vel[1]);
+        res.push_back(pvacur_.vel[2]);
+        return res;
+    }
+
+    void LLA_to_ecef(double latitude_deg, double longitude_deg, double altitude_m, double &x, double &y, double &z) {
+        const double a  = 6378137.0; // 半长轴（米）
+        const double e  = 8.1819190842622e-2;
+        const double e2 = e * e; // 偏心率平方
+        double lat_rad  = latitude_deg * M_PI / 180.0;
+        double lon_rad  = longitude_deg * M_PI / 180.0;
+
+        double N = a / sqrt(1.0 - e2 * sin(lat_rad) * sin(lat_rad));
+
+        x = (N + altitude_m) * cos(lat_rad) * cos(lon_rad);
+        y = (N + altitude_m) * cos(lat_rad) * sin(lon_rad);
+        z = ((1.0 - e2) * N + altitude_m) * sin(lat_rad);
+    }
+
+    // 计算飞行器与卫星之间的测距
+    double computeLaserRange(const Eigen::Vector3d &aircraft_pos, const Eigen::Vector3d &satellite_pos);
+
+    void compute_and_print_error(int timeIndex);
+
+    double last_laser_time_;
 
 private:
     /**
@@ -203,7 +261,7 @@ private:
      * @param [in] R  观测噪声阵
      *                measurement noise matrix
      * */
-    void EKFUpdate(Eigen::MatrixXd &dz, Eigen::MatrixXd &H, Eigen::MatrixXd &R);
+    void EKFUpdate(Eigen::VectorXd &dz, Eigen::MatrixXd &H, Eigen::MatrixXd &R);
 
     /**
      * @brief 反馈误差状态到当前状态
@@ -225,11 +283,23 @@ private:
         }
     }
 
+    // 激光测距观测更新
+    void LaserUpdate(const double &z, const Eigen::Vector3d &satellite_pos_ned);
+
+    // BLH to ECEF Jacobian
+    Matrix3d computeBLHtoECEFJacobian(const Vector3d &blh);
+
 private:
+    double starttime_;
+    std::string tlepath_;
+    std::string coverpath_;
+    std::string truthpath_;
     GINSOptions options_;
-
+    DataProcessing *dataProcesser_;
     double timestamp_;
-
+    std::vector<std::vector<double>> realPositions_;  // 飞行器真实位置
+    std::vector<std::vector<double>> realVelocities_; // 飞行器真实速度
+    int choose_sat_index_;                            // 选星下标
     // 更新时间对齐误差，IMU状态和观测信息误差小于它则认为两者对齐
     // updata time align error
     const double TIME_ALIGN_ERR = 0.001;

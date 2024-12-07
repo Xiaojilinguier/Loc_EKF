@@ -10,18 +10,22 @@ if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
     add_definitions( -D_USE_MATH_DEFINES=True)
     add_compile_options("$<$<C_COMPILER_ID:MSVC>:/utf-8>")
     add_compile_options("$<$<CXX_COMPILER_ID:MSVC>:/utf-8>")
+    add_compile_options(-std=c++14 -pthread -g  -ggdb -O0 -Wall   -fstack-protector-all -march=native -fnon-call-exceptions)
 else()
     set(CMAKE_CXX_FLAGS "-Wno-unused-result")
 endif()
 
 file(GLOB_RECURSE SOURCE
-        src/kf_gins.cpp
+        src/new_kf.cpp
         src/fileio/fileloader.cc
         src/fileio/filesaver.cc
         src/kf-gins/gi_engine.cpp
         src/kf-gins/insmech.cpp
-        src/kf-gins/drawError.cpp)
-
+        src/kf-gins/drawError.cpp
+        src/kf-gins/satellite.cpp
+        src/kf-gins/DataProcessing.cpp
+        )
+message(STATUS "All source files: ${SOURCE}")
 include_directories(${PROJECT_SOURCE_DIR}/src)
 add_executable(${PROJECT_NAME} ${SOURCE})
 
@@ -50,4 +54,8 @@ target_link_libraries(${PROJECT_NAME}
         absl::str_format
         absl::time)
 
-
+#pybind11
+set(Pybind11_INCLUDE_DIRS "/usr/local/include/pybind11")
+find_package(pybind11 REQUIRED)
+target_link_libraries(${PROJECT_NAME} pybind11::module)
+target_include_directories(${PROJECT_NAME} PRIVATE "/usr/local/include/pybind11")

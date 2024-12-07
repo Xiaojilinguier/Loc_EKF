@@ -262,6 +262,22 @@ public:
 
         return enwn(rmn, global, vel);
     }
+
+    static Vector3d ecefToNed(const Vector3d &ecef_point, const Vector3d &blh) {
+        double sin_lat = sin(blh[0]);
+        double sin_lon = sin(blh[1]);
+        double cos_lat = cos(blh[0]);
+        double cos_lon = cos(blh[1]);
+        Matrix3d R;
+        R << -sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat, -sin_lon, cos_lon, 0, -cos_lat * cos_lon,
+            -cos_lat * sin_lon, -sin_lat;
+        Vector3d ecef_ref = blh2ecef(blh);
+        // 计算相对位置向量
+        Vector3d delta_ecef = ecef_point - ecef_ref;
+        // 计算 NED 坐标
+        Vector3d ned = R * delta_ecef;
+        return ned;
+    }
 };
 
 #endif // EARTH_H
